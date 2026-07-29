@@ -1,0 +1,2 @@
+Plain text file for testing multi-format ingestion pipeline.
+Contains simple prose sentences about RAG and vector databases.
