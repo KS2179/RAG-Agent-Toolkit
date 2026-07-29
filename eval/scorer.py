@@ -131,16 +131,16 @@ class FaithfulnessScorer:
             raise RuntimeError(f"OpenAI client failed to init: {e}")
 
     # ── Public API ────────────────────────────────────────────────────────────
-def score_sample(
-    self,
-    sample_id: str,
-    question: str,
-    answer: str,
-    context: str,
-    ground_truth: str,
-    expected_source: Optional[str] = None,
-    actual_tools: Optional[List[str]] = None,
-) -> SampleScore:
+    def score_sample(
+        self,
+        sample_id: str,
+        question: str,
+        answer: str,
+        context: str,
+        ground_truth: str,
+        expected_source: Optional[str] = None,
+        actual_tools: Optional[List[str]] = None,
+    ) -> SampleScore:
         """Score a single QA pair across all metrics including tool selection if expected_source is provided."""
         result = SampleScore(
             id=sample_id,
