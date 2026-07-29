@@ -1,0 +1,161 @@
+# config/phase3.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — Evaluation Dataset · Faithfulness Scoring · CI Integration
+# Extends phase2.yaml — inherits all retrieval / embedding / store settings.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.0.0"
+
+# ── Inherited from Phase 2 (copy relevant blocks here for self-containment) ───
+chunking:
+  min_tokens: 500
+  max_tokens: 800
+  overlap_tokens: 100
+  tokenizer: "cl100k_base"
+
+embedding:
+  provider: "openai"
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  batch_size: 64
+
+vector_store:
+  backend: "chroma"
+  chroma:
+    persist_directory: "./chroma_db"
+    collection_name: "rag_phase3"
+  weaviate:
+    url: "http://localhost:8080"
+    class_name: "RagChunk"
+
+retrieval:
+  top_k: 5
+  score_threshold: 0.0
+  include_metadata: true
+  hybrid:
+    enabled: true
+    vector_weight: 0.6
+    bm25_weight: 0.4
+    candidate_multiplier: 4
+  reranker:
+    enabled: true
+    model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    top_k_after_rerank: 5
+
+citation_enforcement:
+  enabled: true
+  min_citations_required: 1
+  citation_pattern: "\\[([a-f0-9]{8}:\\d+)\\]"
+  on_violation: "retry"
+  max_retries: 2
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  dataset_path: "eval/dataset.jsonl" # one QA pair per line
+  results_path: "eval/results.jsonl" # written after each run
+  report_path: "eval/report.json" # summary metrics
+
+  # ── Faithfulness thresholds (CI gates) ────────────────────────────────────
+  thresholds:
+    faithfulness: 0.75 # fraction of answer claims supported by context
+    answer_relevance: 0.70 # how well the answer addresses the question
+    context_recall: 0.65 # fraction of ground-truth covered by retrieved chunks
+    citation_coverage: 0.80 # fraction of answers with ≥1 valid inline citation
+
+  # ── Scorer settings ────────────────────────────────────────────────────────
+  scorer:
+    model: "gpt-4o-mini" # LLM used to judge faithfulness
+    batch_size: 10 # QA pairs evaluated in parallel
+    max_workers: 4 # thread-pool size for concurrent scoring
+
+  # ── CI behaviour ──────────────────────────────────────────────────────────
+  ci:
+    fail_on_threshold_breach: true # exit 1 if any metric is below threshold
+    min_dataset_size: 20 # refuse to run eval on tiny datasets
+    sample_size: null # null = run full dataset; int = random sample
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+prompts:
+  rag_system: |
+    You are a precise research assistant. Answer the user's question using ONLY
+    the provided context chunks.
+
+    CITATION RULES (strictly enforced):
+    1. Every factual claim MUST include an inline citation: [doc_id:chunk_index]
+    2. Use the exact citation IDs shown in the context headers — do not invent them.
+    3. If the context is insufficient, respond: "I don't have enough information."
+    4. Never add knowledge beyond what the context contains.
+
+  rag_user: |
+    Context chunks:
+    {context}
+
+    Question: {question}
+
+    Answer (every claim must be cited with [doc_id:chunk_index]):
+
+  rag_retry: |
+    Your previous answer was missing required inline citations [doc_id:chunk_index].
+    Rewrite with EVERY factual claim cited. Use ONLY IDs from the context headers.
+
+    Original answer:
+    {previous_answer}
+
+    Context chunks:
+    {context}
+
+    Corrected answer (with citations):
+
+  # ── Evaluation judge prompts ───────────────────────────────────────────────
+  faithfulness_judge: |
+    You are an impartial evaluation judge. Your task is to assess whether an
+    AI-generated answer is faithful to the provided context.
+
+    A claim is FAITHFUL if it is directly supported by the context.
+    A claim is UNFAITHFUL if it adds information not present in the context,
+    contradicts the context, or is a hallucination.
+
+    Context:
+    {context}
+
+    Answer to evaluate:
+    {answer}
+
+    Instructions:
+    1. Break the answer into individual factual claims.
+    2. For each claim, determine if it is supported by the context (1) or not (0).
+    3. Return ONLY valid JSON in this exact format:
+    {{
+      "claims": [
+        {{"claim": "<claim text>", "supported": true, "evidence": "<quote or 'none'>"}},
+        ...
+      ],
+      "faithfulness_score": <float 0.0–1.0>,
+      "reasoning": "<one sentence summary>"
+    }}
+
+  answer_relevance_judge: |
+    You are an impartial evaluation judge assessing answer relevance.
+
+    Question: {question}
+    Answer: {answer}
+
+    Rate how well the answer addresses the question on a scale of 0.0 to 1.0.
+    Return ONLY valid JSON:
+    {{
+      "relevance_score": <float 0.0–1.0>,
+      "reasoning": "<one sentence>"
+    }}
+
+  context_recall_judge: |
+    You are evaluating whether retrieved context covers the ground-truth answer.
+
+    Ground-truth answer: {ground_truth}
+    Retrieved context: {context}
+
+    What fraction of the ground-truth information is present in the context?
+    Return ONLY valid JSON:
+    {{
+      "recall_score": <float 0.0–1.0>,
+      "reasoning": "<one sentence>"
+    }}
