@@ -1,0 +1,126 @@
+# .github/workflows/eval.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# RAG Evaluation CI
+#
+# Triggers: every pull request targeting main or develop
+#
+# What it does:
+#   1. Installs Python dependencies
+#   2. Seeds the eval dataset if not cached
+#   3. Runs the offline evaluation script (retrieval-only to avoid LLM cost)
+#   4. Uploads eval/report.json and eval/results.jsonl as artifacts
+#   5. Fails the PR check if any metric breaches its threshold
+#
+# To run with full LLM scoring add OPENAI_API_KEY to your repo secrets
+# and remove --retrieval-only from the eval step.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: RAG Evaluation
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main] # also run on merge to catch regressions
+  workflow_dispatch: # allow manual trigger from GitHub UI
+
+jobs:
+  evaluate:
+    name: Faithfulness & Retrieval Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python setup ────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── Install dependencies ────────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install tiktoken pydantic pyyaml python-dotenv rank-bm25 \
+                      chromadb openai sentence-transformers pytest
+
+      # ── Seed eval dataset ───────────────────────────────────────────────────
+      - name: Seed evaluation dataset
+        run: |
+          python eval/build_dataset.py --mode seed --output eval/dataset.jsonl
+          python eval/build_dataset.py --mode validate --output eval/dataset.jsonl
+
+      # ── Cache ChromaDB (speeds up repeated runs) ─────────────────────────────
+      - name: Cache vector store
+        uses: actions/cache@v4
+        with:
+          path: chroma_db/
+          key: chroma-${{ hashFiles('main.py') }}
+
+      # ── Run evaluation ───────────────────────────────────────────────────────
+      # Using --retrieval-only by default (no OPENAI_API_KEY required for CI).
+      # Measures context recall and citation coverage without LLM generation.
+      # Remove --retrieval-only and add OPENAI_API_KEY secret for full scoring.
+      - name: Run evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python eval/run_eval.py \
+            --config config/phase3.yaml \
+            --retrieval-only
+
+      # ── Upload artifacts ─────────────────────────────────────────────────────
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        if: always() # upload even if the eval step fails
+        with:
+          name: eval-report-${{ github.sha }}
+          path: |
+            eval/report.json
+            eval/results.jsonl
+          retention-days: 30
+
+      # ── Post summary to PR ───────────────────────────────────────────────────
+      - name: Post eval summary to job summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os
+          from pathlib import Path
+
+          report_path = Path("eval/report.json")
+          if not report_path.exists():
+              print("No report generated.")
+              exit(0)
+
+          report = json.loads(report_path.read_text())
+          status = "✅ PASSED" if report.get("ci_passed") else "❌ FAILED"
+
+          summary = f"""## RAG Eval Results  {status}
+
+          | Metric | Score | Threshold |
+          |--------|-------|-----------|
+          | Faithfulness | {report['avg_faithfulness']:.3f} | {report['thresholds'].get('faithfulness', '?')} |
+          | Answer Relevance | {report['avg_answer_relevance']:.3f} | {report['thresholds'].get('answer_relevance', '?')} |
+          | Context Recall | {report['avg_context_recall']:.3f} | {report['thresholds'].get('context_recall', '?')} |
+          | Citation Coverage | {report['avg_citation_coverage']:.3f} | {report['thresholds'].get('citation_coverage', '?')} |
+
+          **Samples:** {report['total']}  ·  **Passed:** {report['passed']}  ·  **Failed:** {report['failed']}
+          """
+
+          breaches = report.get("threshold_breaches", [])
+          if breaches:
+              summary += f"\n⚠ **Breached thresholds:** {', '.join(breaches)}\n"
+
+          github_step_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if github_step_summary:
+              with open(github_step_summary, "a") as f:
+                  f.write(summary)
+          else:
+              print(summary)
+          EOF
