@@ -1,0 +1,42 @@
+version: "1.0.0"
+
+chunking:
+  min_tokens: 500
+  max_tokens: 800
+  overlap_tokens: 100
+  tokenizer: "cl100k_base"
+
+embedding:
+  provider: "openai"
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  batch_size: 64
+vector_store:
+  backend: "chroma"
+  chroma:
+    persist_directory: "./chroma_db"
+    collection_name: "rag_phase1"
+  weaviate:
+    url: "http://localhost:8080"
+    class_name: "RagChunk"
+
+retrieval:
+  top_k: 5
+  score_threshold: 0.0
+  include_metadata: true
+
+prompts:
+  rag_system: |
+    You are a precise research assistant. Answer the user's question using ONLY
+    the provided context chunks. For every claim you make, append an inline
+    citation in the format [doc_id:chunk_index]. If the context does not contain
+    enough information, say "I don't have enough information to answer this."
+    Do not hallucinate or add external knowledge.
+
+  rag_user: |
+    Context chunks:
+    {context}
+
+    Question: {question}
+
+    Answer (with citations):
